@@ -1,0 +1,243 @@
+require('dotenv').config();
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const cron = require('node-cron');
+const moment = require('moment-timezone');
+const path = require('path');
+
+const Attendance = require('./models/Attendance');
+const User = require('./models/User');
+
+const app = express();
+
+// --------------------- MIDDLEWARE ---------------------
+app.use(cors());
+app.use(bodyParser.json());
+
+// Set EJS as view engine
+app.set("view engine", "ejs");
+app.set("views", path.join(__dirname, "views"));
+
+// Serve static files
+app.use(express.static(path.join(__dirname, "public")));
+
+// --------------------- DATABASE ---------------------
+mongoose.connect(process.env.MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+})
+.then(() => console.log('✅ MongoDB Connected'))
+.catch(err => console.error('❌ MongoDB Error:', err));
+
+// --------------------- STAFF SUMMARY FUNCTION ---------------------
+/**
+ * Fetches all registered users and calculates their attendance count
+ * for the last 6 days (excluding today).
+ * @returns {Array} An array of user summaries.
+ */
+async function getStaffSummary() {
+    // 1. Get the last 6 dates (excluding today)
+    const dates = [];
+    for (let i = 1; i <= 6; i++) {
+        dates.push(moment().tz("Asia/Kolkata").subtract(i, 'days').format("YYYY-MM-DD"));
+    }
+
+    // 2. Fetch all registered users
+    const allUsers = await User.find({}).lean(); // Use .lean() for performance
+
+    // 3. Fetch attendance records for all users within the last 6 days
+    const attendanceRecords = await Attendance.find({
+        date: { $in: dates }
+    }).lean();
+
+    // 4. Summarize attendance for each user
+    const summary = allUsers.map(user => {
+        // Count unique dates the user was present
+        const presentDays = new Set(
+            attendanceRecords
+                .filter(rec => rec.cardUID === user.cardUID)
+                .map(rec => rec.date)
+        ).size;
+
+        return {
+            name: user.name,
+            cardUID: user.cardUID,
+            presentDays: presentDays,
+            totalDays: 6 // The standard number of days to check against
+        };
+    });
+
+    return summary;
+}
+
+// --------------------- HOME PAGE ---------------------
+app.get('/', async (req, res) => {
+    try {
+        const todayDate = moment().tz("Asia/Kolkata").format("YYYY-MM-DD");
+
+        // Fetch today's attendance records
+        const records = await Attendance.find({ date: todayDate }).sort({ inTime: 1 });
+
+        // Fetch the staff summary for the last 6 working days
+        const staffSummary = await getStaffSummary();
+
+        // Render home.ejs with all necessary data
+        res.render('home', { 
+            todayDate, 
+            records,
+            staffSummary // <--- NEW DATA ADDED
+        });
+    } catch (err) {
+        console.error("Error fetching data for home page:", err);
+        res.render('home', { 
+            todayDate: moment().tz("Asia/Kolkata").format("YYYY-MM-DD"), 
+            records: [], 
+            staffSummary: [] // <--- Pass empty array on error
+        });
+    }
+});
+
+// --------------------- USER REGISTRATION ---------------------
+app.post('/register', async (req, res) => {
+  try {
+    let { name, cardUID } = req.body;
+
+    // Trim inputs
+    name = name?.trim();
+    cardUID = cardUID?.trim();
+
+    // Server-side validation
+    if (!name || name.length < 3) {
+      return res.status(400).json({ error: 'Name must be at least 3 letters.' });
+    }
+    if (!cardUID || cardUID.length < 5 || cardUID.length > 16) {
+      return res.status(400).json({ error: 'Card UID must be between 5 and 16 characters.' });
+    }
+
+    // Normalize UID (uppercase + pad to 8 chars)
+    cardUID = cardUID.toUpperCase().padStart(8, "0");
+
+    // Check if UID already exists
+    const existingUser = await User.findOne({ cardUID });
+    if (existingUser) {
+      return res.status(400).json({ error: 'This Card UID is already registered.' });
+    }
+
+    const user = new User({ name, cardUID });
+    await user.save();
+
+    res.json({ message: 'User registered', user });
+  } catch (err) {
+    console.error('Error in /register:', err);
+    res.status(500).json({ error: 'Server error. Could not register user.' });
+  }
+});
+
+
+// --------------------- MARK ATTENDANCE ---------------------
+app.post('/attendance', async (req, res) => {
+  try {
+    let { cardUID } = req.body;
+
+    // Normalize UID (uppercase + padded to 8 chars)
+    cardUID = cardUID.toUpperCase().padStart(8, "0");
+
+    const user = await User.findOne({ cardUID });
+    if (!user) {
+      return res.status(404).json({ message: 'Card not registered' });
+    }
+
+    const now = moment().tz("Asia/Kolkata");
+    const dateStr = now.format("YYYY-MM-DD");
+    const timeStr = now.format("HH:mm:ss");
+
+    let record = await Attendance.findOne({ cardUID, date: dateStr });
+
+    if (!record) {
+      // First scan → IN
+      record = new Attendance({
+        cardUID,
+        name: user.name,
+        date: dateStr,
+        inTime: timeStr
+      });
+      await record.save();
+      return res.json({ status: "IN", message: "Marked IN", record });
+    } 
+    else if (!record.outTime) {
+      // Second scan → OUT
+      record.outTime = timeStr;
+      await record.save();
+      return res.json({ status: "OUT", message: "Marked OUT", record });
+    } 
+    else {
+      // Already OUT → block further scans
+      return res.status(400).json({ status: "ALREADY_OUT", message: "Already marked OUT today" });
+    }
+
+  } catch (err) {
+    console.error("Error in /attendance:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// --------------------- ATTENDANCE VIEW ---------------------
+
+// Function to generate last 7 days for sidebar
+function getLast7Days() {
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    days.push(moment().tz("Asia/Kolkata").subtract(i, 'days').format("YYYY-MM-DD"));
+  }
+  return days;
+}
+
+// 1️⃣ Today attendance
+app.get('/attendance-page', async (req, res) => {
+  try {
+    const selectedDate = moment().tz("Asia/Kolkata").format("YYYY-MM-DD");
+    const records = await Attendance.find({ date: selectedDate }).sort({ inTime: 1 });
+
+    const dates = getLast7Days();
+    res.render("attendance", { records, selectedDate, dates });
+  } catch (err) {
+    console.error("Error loading attendance page:", err);
+    res.status(500).send("Error loading attendance page");
+  }
+});
+
+// 2️⃣ Specific date
+app.get('/attendance-page/:date', async (req, res) => {
+  try {
+    const selectedDate = req.params.date;
+    const records = await Attendance.find({ date: selectedDate }).sort({ inTime: 1 });
+
+    const dates = getLast7Days();
+    res.render("attendance", { records, selectedDate, dates });
+  } catch (err) {
+    console.error("Error loading attendance page:", err);
+    res.status(500).send("Error loading attendance page");
+  }
+});
+
+// --------------------- CRON JOB ---------------------
+// Auto mark OUT at 23:59 IST
+cron.schedule('59 23 * * *', async () => {
+  try {
+    const today = moment().tz("Asia/Kolkata").format("YYYY-MM-DD");
+    const result = await Attendance.updateMany(
+      { date: today, outTime: { $exists: false } },
+      { $set: { outTime: "23:59:59" } }
+    );
+    console.log(`✅ Auto OUT updated for ${result.modifiedCount} staff at 23:59 (IST)`);
+  } catch (err) {
+    console.error("❌ Error in auto OUT cron:", err);
+  }
+});
+
+// --------------------- START SERVER ---------------------
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));

@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Smart Attendance</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      background: #f8f9fa;
+      padding: 40px;
+    }
+    h1 {
+      color: #007bff;
+    }
+    table {
+      margin: 20px auto;
+      border-collapse: collapse;
+      width: 80%;
+      background: white;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+    }
+    th, td {
+      padding: 12px;
+      border: 1px solid #ddd;
+      text-align: center;
+    }
+    th {
+      background: #007bff;
+      color: white;
+    }
+    form {
+      margin: 30px auto;
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      width: 400px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+      text-align: left;
+    }
+    input[type="text"] {
+      width: 100%;
+      padding: 10px;
+      margin: 8px 0 16px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    button {
+      background: #007bff;
+      color: white;
+      border: none;
+      padding: 12px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    button:hover {
+      background: #0056b3;
+    }
+    .error {
+      color: red;
+      margin-bottom: 10px;
+    }
+    .success {
+      color: green;
+      margin-bottom: 10px;
+    }
+    a {
+      display: inline-block;
+      margin-top: 20px;
+      padding: 12px 24px;
+      background: #007bff;
+      color: white;
+      border-radius: 6px;
+      text-decoration: none;
+      font-size: 16px;
+    }
+    a:hover {
+      background: #0056b3;
+    }
+    /* NEW STYLES for summary */
+    .attendance-count {
+      font-weight: bold;
+    }
+    .count-good {
+      color: #28a745; /* Green */
+    }
+    .count-poor {
+      color: #ffc107; /* Yellow/Orange */
+    }
+    .count-critical {
+      color: #dc3545; /* Red */
+    }
+  </style>
+</head>
+<body>
+  <h1> Smart Attendance System</h1>
+  <p>Track and manage staff attendance easily.</p>
+
+  <h3>Staff Working Days Summary (Last 6 Days)</h3>
+
+  <% if (staffSummary && staffSummary.length > 0) { %>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Card UID</th>
+          <th>Working Days (Days In / 6)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% staffSummary.forEach(user => { %>
+          <tr>
+            <td><%= user.name %></td>
+            <td><%= user.cardUID %></td>
+            <td>
+              <% 
+                let statusClass = 'count-critical';
+                if (user.presentDays >= 5) {
+                  statusClass = 'count-good';
+                } else if (user.presentDays >= 3) {
+                  statusClass = 'count-poor';
+                }
+              %>
+              <span class="attendance-count <%= statusClass %>">
+                <%= user.presentDays %>
+              </span>
+              / <%= user.totalDays %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } else { %>
+    <p>No registered users found for weekly summary.</p>
+  <% } %>
+
+  <hr style="border: 0; border-top: 1px solid #ccc; width: 80%; margin: 40px auto;">
+  <h3>Today's Attendance - <%= todayDate %></h3>
+
+  <% if (records.length > 0) { %>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Card UID</th>
+          <th>IN Time</th>
+          <th>OUT Time</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% records.forEach(record => { %>
+          <tr>
+            <td><%= record.name %></td>
+            <td><%= record.cardUID %></td>
+            <td><%= record.inTime %></td>
+            <td><%= record.outTime ? record.outTime : '-' %></td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  <% } else { %>
+    <p>No attendance records for today.</p>
+  <% } %>
+
+  <h3>Add New User</h3>
+  <form id="registerForm">
+    <div class="error" id="error"></div>
+    <div class="success" id="success"></div>
+
+    <label>Name</label>
+    <input type="text" id="name" placeholder="Enter name (min 3 letters)" required>
+
+    <label>Card UID</label>
+    <input type="text" id="cardUID" placeholder="Enter ID (5-16 characters)" required>
+
+    <button type="submit">Add User</button>
+  </form>
+
+  <a href="/attendance-page">📅 View Attendance</a>
+
+  <script>
+    const form = document.getElementById('registerForm');
+    const errorDiv = document.getElementById('error');
+    const successDiv = document.getElementById('success');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorDiv.textContent = '';
+      successDiv.textContent = '';
+
+      const name = document.getElementById('name').value.trim();
+      const cardUID = document.getElementById('cardUID').value.trim();
+
+      // Client-side validation
+      if (name.length < 3) {
+        errorDiv.textContent = 'Name must be at least 3 letters.';
+        return;
+      }
+      if (cardUID.length < 5 || cardUID.length > 16) {
+        errorDiv.textContent = 'Card UID must be 5-16 characters.';
+        return;
+      }
+
+      try {
+        const res = await fetch('/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, cardUID })
+        });
+
+        const data = await res.json();
+        if (res.ok) {
+          successDiv.textContent = `User "${data.user.name}" registered successfully!`;
+          form.reset();
+        } else {
+          errorDiv.textContent = data.error || 'Error registering user.';
+        }
+      } catch (err) {
+        errorDiv.textContent = 'Server error. Please try again.';
+        console.error(err);
+      }
+    });
+  </script>
+</body>
+</html>
